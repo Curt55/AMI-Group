@@ -2,21 +2,14 @@ const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const multer = require('multer');
-const crypto = require('crypto');
-const upload = multer({ storage: multer.memoryStorage() }); // Store file in RAM temporarily
+const upload = multer({ storage: multer.memoryStorage() });
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-const portalSettings = {
-  applicationFields: [],
-  documentTypes: [],
-};
-
-// Middleware
 app.use(cors());
-app.use(express.json()); // Allows us to read JSON sent from React
+app.use(express.json());
 
 // Initialize Supabase Client
 const supabase = createClient(
@@ -24,324 +17,662 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// Simple Test Route
+// Test route
 app.get('/', (req, res) => {
-  res.send('Portal Backend is running! 🚀');
+  res.send('Client Portal Backend is running! 🚀');
 });
 
-// Middleware to check if the user is an Admin
+// ============ AUTHENTICATION ============
+
+// Login
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  
+  const { data, error } = await supabase.auth.signInWithPassword({ 
+    email, 
+    password 
+  });
+  
+  if (error) {
+    return res.status(401).json({ error: error.message });
+  }
+  
+  // Get profile
+  const { data: profile, error: profileError } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', data.user.id)
+    .single();
+  
+  if (profileError) {
+    return res.status(500).json({ error: 'Profile fetch failed' });
+  }
+  
+  res.json({
+    token: data.session.access_token,
+    user: {
+      id: data.user.id,
+      email: data.user.email,
+      full_name: profile.full_name,
+      role: profile.role
+    }
+  });
+});
+
+// ============ MIDDLEWARE ============
+
+// Check if user is admin
 const isAdmin = async (req, res, next) => {
-  const token = req.headers.authorization?.split(' ')[1]; // Expecting "Bearer <token>"
-
-  if (!token) return res.status(401).json({ error: "No token provided" });
-
-  // Verify the token with Supabase
+  const token = req.headers.authorization?.split(' ')[1];
+  
+  if (!token) {
+    return res.status(401).json({ error: 'No token provided' });
+  }
+  
   const { data: { user }, error } = await supabase.auth.getUser(token);
-
-  if (error || !user) return res.status(401).json({ error: "Invalid session" });
-
-  // Check the role in the database
+  
+  if (error || !user) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+  
   const { data: profile } = await supabase
     .from('profiles')
     .select('role')
     .eq('id', user.id)
     .single();
-
+  
   if (profile?.role !== 'admin') {
-    return res.status(403).json({ error: "Access denied. Admins only." });
+    return res.status(403).json({ error: 'Admin access required' });
   }
-
-  // If everything is fine, proceed to the next function
+  
   req.user = user;
   next();
 };
 
-const loadPortalSettings = async () => {
-  try {
-    const { data, error } = await supabase
-      .from('portal_settings')
-      .select('key, value')
-      .in('key', ['applicationFields', 'documentTypes']);
-
-    if (error || !Array.isArray(data)) {
-      throw error || new Error('Settings not available');
-    }
-
-    const settings = { ...portalSettings };
-    data.forEach((row) => {
-      if (row.key === 'applicationFields') settings.applicationFields = row.value || [];
-      if (row.key === 'documentTypes') settings.documentTypes = row.value || [];
-    });
-    return settings;
-  } catch (err) {
-    return { ...portalSettings };
+// Get client from token
+const getClient = async (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  
+  if (!token) {
+    return res.status(401).json({ error: 'No token provided' });
   }
+  
+  const { data: { user }, error } = await supabase.auth.getUser(token);
+  
+  if (error || !user) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+  
+  req.client = user;
+  next();
 };
 
-const savePortalSettings = async (settings) => {
-  try {
-    const payload = [
-      { key: 'applicationFields', value: settings.applicationFields || [] },
-      { key: 'documentTypes', value: settings.documentTypes || [] },
-    ];
+// ============ ADMIN ROUTES ============
 
-    const { error } = await supabase
-      .from('portal_settings')
-      .upsert(payload, { onConflict: 'key' });
-
-    if (error) throw error;
-    return settings;
-  } catch (err) {
-    Object.assign(portalSettings, settings);
-    return { ...portalSettings };
+// Get all users (both admins and clients) - FIXED
+app.get('/api/admin/clients', isAdmin, async (req, res) => {
+  console.log('Fetching all users...');
+  
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('*')
+    .order('created_at', { ascending: false });
+  
+  if (error) {
+    console.error('Users fetch error:', error);
+    return res.status(500).json({ error: error.message });
   }
-};
-
-app.get('/api/admin/settings', isAdmin, async (req, res) => {
-  const settings = await loadPortalSettings();
-  res.status(200).json(settings);
+  
+  console.log(`Found ${data?.length || 0} users`);
+  res.json(data || []);
 });
 
-app.post('/api/admin/settings', isAdmin, async (req, res) => {
-  const { applicationFields, documentTypes } = req.body;
-  const saved = await savePortalSettings({ applicationFields: applicationFields || [], documentTypes: documentTypes || [] });
-  res.status(200).json(saved);
-});
-
-app.get('/api/user/settings', async (req, res) => {
-  const settings = await loadPortalSettings();
-  res.status(200).json(settings);
-});
-
-// Start the server
-app.listen(PORT, () => {
-  console.log(`Server is purring on http://localhost:${PORT}`);
-});
-
-// Admin Route: Register a new user
-app.post('/api/admin/register-user', isAdmin, async (req, res) => {
-  const { email, password, fullName } = req.body;
-  const generatedPassword = password || crypto.randomBytes(6).toString('base64').replace(/[+/=]/g, 'A');
-
-  // 1. Create the user in Supabase Auth
+// Create new client
+app.post('/api/admin/clients', isAdmin, async (req, res) => {
+  const { email, full_name, password } = req.body;
+  
+  const finalPassword = password || Math.random().toString(36).slice(-8);
+  
   const { data: authData, error: authError } = await supabase.auth.admin.createUser({
-    email: email,
-    password: generatedPassword,
-    email_confirm: true // This bypasses the need for the user to click a link to activate
+    email,
+    password: finalPassword,
+    email_confirm: true,
+    user_metadata: { full_name }
   });
-
+  
   if (authError) {
     return res.status(400).json({ error: authError.message });
   }
-
-  const userId = authData.user.id;
-
-  try {
-    // 2. Insert into the 'profiles' table
-    const { error: profileError } = await supabase
-      .from('profiles')
-      .insert([
-        { id: userId, email: email, full_name: fullName, role: 'user' }
-      ]);
-
-    if (profileError) throw profileError;
-
-    // 3. Create an initial 'application' entry for them
-    const { error: appError } = await supabase
-      .from('applications')
-      .insert([
-        { user_id: userId, status: 'Pending' }
-      ]);
-
-    if (appError) throw appError;
-
-    res.status(201).json({ 
-      message: 'User registered successfully!', 
-      user: authData.user,
-      credentials: {
-        email,
-        password: generatedPassword,
-      }
-    });
-
-  } catch (error) {
-    res.status(500).json({ error: 'Database error: ' + error.message });
+  
+  const { data: profile, error: profileError } = await supabase
+    .from('profiles')
+    .insert({
+      id: authData.user.id,
+      email,
+      full_name,
+      role: 'client'
+    })
+    .select()
+    .single();
+  
+  if (profileError) {
+    return res.status(500).json({ error: profileError.message });
   }
+  
+  await supabase.from('client_requirements').insert({ client_id: profile.id });
+  await supabase.from('submissions').insert({ client_id: profile.id, status: 'incomplete' });
+  
+  res.json({
+    message: 'Client created successfully',
+    client: profile,
+    credentials: { email, password: finalPassword }
+  });
 });
 
-// Admin Route: List all users
-app.get('/api/admin/users', isAdmin, async (req, res) => {
+// Get client requirements
+app.get('/api/admin/clients/:id/requirements', isAdmin, async (req, res) => {
+  const { id } = req.params;
+  
   const { data, error } = await supabase
-    .from('profiles')
-    .select('id, email, full_name, role, created_at')
-    .order('created_at', { ascending: false });
-
-  if (error) return res.status(500).json({ error: error.message });
-  res.status(200).json(data || []);
-});
-
-// Admin Route: Reset user password
-app.post('/api/admin/users/:id/reset-password', isAdmin, async (req, res) => {
-  const userId = req.params.id;
-  const newPassword = crypto.randomBytes(6).toString('base64').replace(/[+/=]/g, 'A');
-
-  const { data: updatedUser, error } = await supabase.auth.admin.updateUserById(userId, {
-    password: newPassword,
-  });
-
-  if (error) return res.status(500).json({ error: error.message });
-
-  res.status(200).json({
-    message: 'Password reset successfully',
-    credentials: {
-      email: updatedUser.user.email,
-      password: newPassword,
-    },
-  });
-});
-
-// Login Route
-app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body;
-
-  // 1. Authenticate with Supabase Auth
-  const { data, error } = await supabase.auth.signInWithPassword({
-    email,
-    password,
-  });
-
-  if (error) return res.status(401).json({ error: error.message });
-
-  // 2. Fetch the user's role from our 'profiles' table
-  const { data: profile, error: profileError } = await supabase
-    .from('profiles')
-    .select('role, full_name')
-    .eq('id', data.user.id)
-    .single();
-
-  if (profileError) return res.status(500).json({ error: "Profile fetch failed" });
-
-  // 3. Send back the session and the role
-  res.status(200).json({
-    message: "Login successful",
-    session: data.session,
-    user: {
-      id: data.user.id,
-      email: data.user.email,
-      role: profile.role,
-      fullName: profile.full_name
-    }
-  });
-});
-
-// User Route: Fetch current user info
-app.get('/api/user/me', async (req, res) => {
-  const token = req.headers.authorization?.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'No token provided' });
-
-  const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-  if (authError || !user) return res.status(401).json({ error: 'Invalid session' });
-
-  const { data: profile, error: profileError } = await supabase
-    .from('profiles')
-    .select('id, email, full_name, role')
-    .eq('id', user.id)
-    .single();
-
-  if (profileError) return res.status(500).json({ error: profileError.message });
-
-  const { data: applications, error: applicationsError } = await supabase
-    .from('applications')
-    .select('id, status, created_at')
-    .eq('user_id', user.id)
-    .order('created_at', { ascending: false });
-
-  if (applicationsError) return res.status(500).json({ error: applicationsError.message });
-
-  const applicationIds = applications.map((app) => app.id);
-  const { data: documents, error: documentsError } = await supabase
-    .from('documents')
-    .select('id, file_name, file_url, created_at, application_id, document_type')
-    .in('application_id', applicationIds);
-
-  if (documentsError) return res.status(500).json({ error: documentsError.message });
-
-  const settings = await loadPortalSettings();
-  const uploadedDocumentTypes = new Set((documents || []).map((doc) => doc.document_type).filter(Boolean));
-  const missingDocuments = (settings.documentTypes || []).filter((type) => !uploadedDocumentTypes.has(type));
-
-  res.status(200).json({ user: profile, applications, documents, settings, missingDocuments });
-});
-
-// User Route: Upload a document
-app.post('/api/user/upload', upload.single('document'), async (req, res) => {
-  try {
-    const file = req.file;
-    const { applicationId, userId } = req.body; // Sent from frontend
-
-    if (!file) return res.status(400).json({ error: "No file uploaded" });
-
-    // 1. Create a unique file path (e.g., user_123/162534_resume.pdf)
-    const filePath = `${userId}/${Date.now()}_${file.originalname}`;
-
-    // 2. Upload to Supabase Storage
-    const { data: storageData, error: storageError } = await supabase.storage
-      .from('user-documents') // The bucket name we created
-      .upload(filePath, file.buffer, {
-        contentType: file.mimetype,
-        upsert: false
-      });
-
-    if (storageError) throw storageError;
-
-    // 3. Get the Public URL
-    const { data: { publicUrl } } = supabase.storage
-      .from('user-documents')
-      .getPublicUrl(filePath);
-
-    // 4. Save metadata to the 'documents' table
-    const documentPayload = {
-      application_id: applicationId,
-      file_name: file.originalname,
-      file_url: publicUrl,
-      ...(req.body.documentType ? { document_type: req.body.documentType } : {}),
-    };
-
-    let dbError;
-    let insertResult = await supabase.from('documents').insert([documentPayload]);
-    dbError = insertResult.error;
-
-    if (dbError && dbError.message && dbError.message.toLowerCase().includes('column')) {
-      // Fallback if the documents table does not have a document_type column
-      const fallbackPayload = {
-        application_id: applicationId,
-        file_name: file.originalname,
-        file_url: publicUrl,
-      };
-      insertResult = await supabase.from('documents').insert([fallbackPayload]);
-      dbError = insertResult.error;
-    }
-
-    if (dbError) throw dbError;
-
-    res.status(200).json({ message: "File uploaded successfully!", url: publicUrl });
-
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    .from('client_requirements')
+    .select('*')
+    .eq('client_id', id)
+    .maybeSingle();
+  
+  if (error) {
+    return res.status(500).json({ error: error.message });
   }
+  
+  res.json(data || { required_fields: [], required_documents: [] });
 });
-// Admin Route: Get all documents for all users
+
+// Update client requirements
+app.put('/api/admin/clients/:id/requirements', isAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { required_fields, required_documents } = req.body;
+  
+  const { data, error } = await supabase
+    .from('client_requirements')
+    .update({
+      required_fields: required_fields || [],
+      required_documents: required_documents || [],
+      updated_at: new Date()
+    })
+    .eq('client_id', id)
+    .select();
+  
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+  
+  res.json(data[0] || { success: true });
+});
+
+// Get all submissions
+app.get('/api/admin/submissions', isAdmin, async (req, res) => {
+  const { data, error } = await supabase
+    .from('submissions')
+    .select(`
+      *,
+      profiles (
+        full_name,
+        email
+      )
+    `)
+    .order('created_at', { ascending: false });
+  
+  if (error) {
+    console.error('Submissions fetch error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+  
+  console.log('Found submissions:', data?.length);
+  res.json(data || []);
+});
+
+// Update submission status
+app.patch('/api/admin/submissions/:id', isAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { status, admin_notes } = req.body;
+  
+  console.log('Updating submission:', id, 'to status:', status);
+  
+  const { data, error } = await supabase
+    .from('submissions')
+    .update({
+      status: status,
+      admin_notes: admin_notes || null,
+      updated_at: new Date()
+    })
+    .eq('id', id)
+    .select();
+  
+  if (error) {
+    console.error('Status update error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+  
+  console.log('Status updated successfully');
+  res.json(data[0] || { success: true });
+});
+
+// Get all documents
 app.get('/api/admin/documents', isAdmin, async (req, res) => {
   const { data, error } = await supabase
     .from('documents')
     .select(`
       *,
-      applications (
-        status,
-        profiles (full_name, email)
+      profiles (
+        full_name,
+        email
       )
-    `);
-
-  if (error) return res.status(500).json({ error: error.message });
-  res.status(200).json(data);
+    `)
+    .order('uploaded_at', { ascending: false });
+  
+  if (error) {
+    console.error('Documents fetch error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+  
+  console.log('Found documents:', data?.length);
+  res.json(data || []);
 });
+
+// Get all messages for admin
+app.get('/api/admin/messages', isAdmin, async (req, res) => {
+  console.log('Fetching all messages');
+  
+  const { data, error } = await supabase
+    .from('messages')
+    .select(`
+      *,
+      from_user:profiles!from_user_id (
+        id,
+        full_name,
+        email,
+        role
+      ),
+      to_user:profiles!to_user_id (
+        id,
+        full_name,
+        email,
+        role
+      )
+    `)
+    .order('created_at', { ascending: false });
+  
+  if (error) {
+    console.error('Messages fetch error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+  
+  console.log('Found messages:', data?.length || 0);
+  res.json(data || []);
+});
+
+// Mark message as read
+app.patch('/api/messages/:id/read', async (req, res) => {
+  const { id } = req.params;
+  const token = req.headers.authorization?.split(' ')[1];
+  
+  if (!token) {
+    return res.status(401).json({ error: 'No token provided' });
+  }
+  
+  const { data: { user }, error } = await supabase.auth.getUser(token);
+  if (error || !user) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+  
+  const { error: updateError } = await supabase
+    .from('messages')
+    .update({ is_read: true })
+    .eq('id', id)
+    .eq('to_user_id', user.id);
+  
+  if (updateError) {
+    return res.status(500).json({ error: updateError.message });
+  }
+  
+  res.json({ success: true });
+});
+
+// Get unread count for current user
+app.get('/api/messages/unread/count', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  
+  if (!token) {
+    return res.status(401).json({ error: 'No token provided' });
+  }
+  
+  const { data: { user }, error } = await supabase.auth.getUser(token);
+  if (error || !user) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+  
+  const { count, error: countError } = await supabase
+    .from('messages')
+    .select('*', { count: 'exact', head: true })
+    .eq('to_user_id', user.id)
+    .eq('is_read', false);
+  
+  if (countError) {
+    return res.status(500).json({ error: countError.message });
+  }
+  
+  res.json({ unreadCount: count || 0 });
+});
+
+// Get available statuses
+app.get('/api/admin/statuses', isAdmin, async (req, res) => {
+  res.json({
+    statuses: [
+      { value: 'incomplete', label: 'Incomplete', color: '#6b7280' },
+      { value: 'reviewing', label: 'Under Review', color: '#f59e0b' },
+      { value: 'processing', label: 'Processing', color: '#3b82f6' },
+      { value: 'approved', label: 'Approved', color: '#10b981' },
+      { value: 'declined', label: 'Declined', color: '#ef4444' }
+    ]
+  });
+});
+
+// Send message to client
+app.post('/api/admin/messages', isAdmin, async (req, res) => {
+  const { to_user_id, message } = req.body;
+  
+  console.log('Admin sending message to:', to_user_id);
+  
+  if (!message || !to_user_id) {
+    return res.status(400).json({ error: 'Message and recipient are required' });
+  }
+  
+  const { data, error } = await supabase
+    .from('messages')
+    .insert({
+      from_user_id: req.user.id,
+      to_user_id: to_user_id,
+      message: message,
+      is_read: false,
+      created_at: new Date()
+    })
+    .select();
+  
+  if (error) {
+    console.error('Insert error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+  
+  console.log('Message sent successfully');
+  res.json({ success: true, message: 'Message sent' });
+});
+
+// ============ CLIENT ROUTES ============
+
+// Get client dashboard data
+app.get('/api/client/dashboard', getClient, async (req, res) => {
+  const clientId = req.client.id;
+  
+  const { data: requirements } = await supabase
+    .from('client_requirements')
+    .select('*')
+    .eq('client_id', clientId)
+    .maybeSingle();
+  
+  const { data: submission } = await supabase
+    .from('submissions')
+    .select('*')
+    .eq('client_id', clientId)
+    .maybeSingle();
+  
+  const { data: documents } = await supabase
+    .from('documents')
+    .select('*')
+    .eq('client_id', clientId)
+    .order('uploaded_at', { ascending: false });
+  
+  const { data: messages } = await supabase
+    .from('messages')
+    .select(`
+      *,
+      profiles!from_user_id (
+        full_name,
+        role
+      )
+    `)
+    .or(`from_user_id.eq.${clientId},to_user_id.eq.${clientId}`)
+    .order('created_at', { ascending: true });
+  
+  res.json({
+    requirements: requirements || { required_fields: [], required_documents: [] },
+    submission: submission || { field_data: {}, status: 'incomplete' },
+    documents: documents || [],
+    messages: messages || []
+  });
+});
+
+// Update client submission
+app.put('/api/client/submission', getClient, async (req, res) => {
+  const { field_data } = req.body;
+  const clientId = req.client.id;
+  
+  try {
+    const { data: existing } = await supabase
+      .from('submissions')
+      .select('id')
+      .eq('client_id', clientId)
+      .maybeSingle();
+    
+    if (existing) {
+      await supabase
+        .from('submissions')
+        .update({
+          field_data: field_data,
+          updated_at: new Date()
+        })
+        .eq('client_id', clientId);
+    } else {
+      await supabase
+        .from('submissions')
+        .insert({
+          client_id: clientId,
+          field_data: field_data,
+          status: 'incomplete',
+          created_at: new Date(),
+          updated_at: new Date()
+        });
+    }
+    
+    res.json({ success: true, message: 'Submission saved' });
+  } catch (err) {
+    console.error('Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Upload document
+app.post('/api/client/upload', getClient, upload.single('file'), async (req, res) => {
+  const { document_type } = req.body;
+  const file = req.file;
+  
+  if (!file) {
+    return res.status(400).json({ error: 'No file uploaded' });
+  }
+  
+  const filePath = `${req.client.id}/${Date.now()}_${file.originalname}`;
+  
+  const { error: uploadError } = await supabase.storage
+    .from('client-documents')
+    .upload(filePath, file.buffer, {
+      contentType: file.mimetype
+    });
+  
+  if (uploadError) {
+    return res.status(500).json({ error: uploadError.message });
+  }
+  
+  const { data: { publicUrl } } = supabase.storage
+    .from('client-documents')
+    .getPublicUrl(filePath);
+  
+  const { data: document, error: docError } = await supabase
+    .from('documents')
+    .insert({
+      client_id: req.client.id,
+      document_type,
+      file_name: file.originalname,
+      file_url: publicUrl
+    })
+    .select();
+  
+  if (docError) {
+    return res.status(500).json({ error: docError.message });
+  }
+  
+  res.json(document[0]);
+});
+
+// Send message to admin
+app.post('/api/client/message', getClient, async (req, res) => {
+  const { message } = req.body;
+  
+  if (!message) {
+    return res.status(400).json({ error: 'Message is required' });
+  }
+  
+  try {
+    const { data: admin, error: adminError } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('role', 'admin')
+      .limit(1)
+      .single();
+    
+    if (adminError || !admin) {
+      return res.status(500).json({ error: 'No admin found' });
+    }
+    
+    const { error } = await supabase
+      .from('messages')
+      .insert({
+        from_user_id: req.client.id,
+        to_user_id: admin.id,
+        message: message,
+        is_read: false,
+        created_at: new Date()
+      });
+    
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+    
+    res.json({ success: true, message: 'Message sent' });
+  } catch (err) {
+    console.error('Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin Route: Delete a user completely (auth + profiles + all related data)
+app.delete('/api/admin/users/:id', isAdmin, async (req, res) => {
+  const userId = req.params.id;
+  
+  // Don't allow deleting yourself
+  if (userId === req.user.id) {
+    return res.status(400).json({ error: 'You cannot delete your own account' });
+  }
+  
+  try {
+    // 1. Get user's submissions
+    const { data: submissions } = await supabase
+      .from('submissions')
+      .select('id')
+      .eq('client_id', userId);
+    
+    const submissionIds = submissions?.map(s => s.id) || [];
+    
+    // 2. Delete documents linked to submissions
+    if (submissionIds.length > 0) {
+      await supabase.from('documents').delete().in('submission_id', submissionIds);
+    }
+    
+    // 3. Delete documents directly linked to user
+    await supabase.from('documents').delete().eq('client_id', userId);
+    
+    // 4. Delete messages
+    await supabase.from('messages').delete().or(`from_user_id.eq.${userId},to_user_id.eq.${userId}`);
+    
+    // 5. Delete submissions
+    await supabase.from('submissions').delete().eq('client_id', userId);
+    
+    // 6. Delete requirements
+    await supabase.from('client_requirements').delete().eq('client_id', userId);
+    
+    // 7. Delete profile
+    await supabase.from('profiles').delete().eq('id', userId);
+    
+    // 8. Delete auth user
+    const { error: authError } = await supabase.auth.admin.deleteUser(userId);
+    
+    if (authError) {
+      console.error('Auth delete error:', authError);
+    }
+    
+    res.json({ success: true, message: 'User deleted successfully' });
+  } catch (error) {
+    console.error('Delete user error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ PASSWORD RESET ROUTE ============
+
+// Admin Route: Reset user password and return new password
+app.post('/api/admin/users/:id/reset-password', isAdmin, async (req, res) => {
+  const userId = req.params.id;
+  const newPassword = Math.random().toString(36).slice(-8);
+  
+  console.log(`Resetting password for user: ${userId}`);
+  
+  try {
+    const { data: updatedUser, error } = await supabase.auth.admin.updateUserById(userId, {
+      password: newPassword,
+    });
+    
+    if (error) {
+      console.error('Reset password error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    
+    // Get user email and name for response
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('email, full_name')
+      .eq('id', userId)
+      .single();
+    
+    res.status(200).json({
+      success: true,
+      message: 'Password reset successfully',
+      credentials: {
+        email: profile?.email || updatedUser.user?.email,
+        password: newPassword,
+      },
+    });
+  } catch (err) {
+    console.error('Reset password error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============ START SERVER (Production Ready) ============
+// This works for BOTH local development AND serverless deployment
+if (require.main === module) {
+  // This file is being run directly (local development)
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on http://localhost:${PORT}`);
+    console.log(`📝 Admin login: admin@portal.com / admin123`);
+  });
+}
+
+// Export for serverless platforms (Cyclic, Railway, Vercel)
+module.exports = app;
