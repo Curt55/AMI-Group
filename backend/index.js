@@ -8,7 +8,16 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors());
+// ============ CORS CONFIGURATION (UPDATED FOR NETLIFY) ============
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+
+app.use(cors({
+  origin: FRONTEND_URL,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
 
 // Initialize Supabase Client
@@ -671,6 +680,7 @@ if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`🚀 Server running on http://localhost:${PORT}`);
     console.log(`📝 Admin login: admin@portal.com / admin123`);
+    console.log(`🔗 CORS enabled for: ${FRONTEND_URL}`);
   });
 }
 
