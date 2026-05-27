@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import API_URL from '../config';
@@ -10,27 +10,56 @@ const Login = () => {
   const [error, setError] = useState('');
   const navigate = useNavigate();
 
+  // Check if already logged in
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    if (token) {
+      // Set default auth header
+      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+      // Redirect to appropriate dashboard
+      const user = JSON.parse(localStorage.getItem('user') || '{}');
+      if (user.role === 'admin') {
+        navigate('/admin');
+      } else if (user.role === 'client') {
+        navigate('/client');
+      } else {
+        navigate('/dashboard');
+      }
+    }
+  }, [navigate]);
+
   const handleSignIn = async (e) => {
     e.preventDefault();
     setLoading(true);
     setError('');
 
     try {
-      const response = await axios.post(`${API_URL}/api/auth/login', {
+      const response = await axios.post(`${API_URL}/api/auth/login`, {
         email,
         password
       });
 
-      localStorage.setItem('token', response.data.token);
-      localStorage.setItem('user', JSON.stringify(response.data.user));
+      // Store token and user data
+      if (response.data.token) {
+        localStorage.setItem('token', response.data.token);
+        localStorage.setItem('user', JSON.stringify(response.data.user));
+        
+        // Set default authorization header for all future requests
+        axios.defaults.headers.common['Authorization'] = `Bearer ${response.data.token}`;
+      }
 
-      if (response.data.user.role === 'admin') {
+      // Redirect based on role
+      const userRole = response.data.user?.role;
+      if (userRole === 'admin') {
         navigate('/admin');
+      } else if (userRole === 'client') {
+        navigate('/client');
       } else {
         navigate('/dashboard');
       }
     } catch (err) {
-      setError(err.response?.data?.error || 'Invalid email or password');
+      console.error('Login error:', err);
+      setError(err.response?.data?.message || err.response?.data?.error || 'Invalid email or password');
     } finally {
       setLoading(false);
     }
@@ -90,6 +119,10 @@ const Login = () => {
               objectFit: 'contain',
               marginBottom: '16px',
               borderRadius: '16px'
+            }}
+            onError={(e) => {
+              e.target.onerror = null;
+              e.target.src = 'https://via.placeholder.com/80x80?text=AMI';
             }}
           />
           <h1 style={{
@@ -169,6 +202,7 @@ const Login = () => {
               onChange={(e) => setEmail(e.target.value)}
               placeholder="admin@portal.com"
               required
+              autoComplete="email"
               style={{
                 width: '100%',
                 padding: '12px 0',
@@ -202,6 +236,7 @@ const Login = () => {
               onChange={(e) => setPassword(e.target.value)}
               placeholder="********"
               required
+              autoComplete="current-password"
               style={{
                 width: '100%',
                 padding: '12px 0',
@@ -223,19 +258,23 @@ const Login = () => {
             style={{
               width: '100%',
               padding: '14px',
-              background: '#1e3c72',
+              background: loading ? '#9ca3af' : '#1e3c72',
               border: 'none',
               borderRadius: '10px',
               fontSize: '15px',
               fontWeight: '500',
               color: '#ffffff',
-              cursor: 'pointer',
+              cursor: loading ? 'not-allowed' : 'pointer',
               transition: 'all 0.2s ease',
               marginBottom: '28px',
               fontFamily: 'inherit'
             }}
-            onMouseEnter={(e) => e.target.style.background = '#2a5298'}
-            onMouseLeave={(e) => e.target.style.background = '#1e3c72'}
+            onMouseEnter={(e) => {
+              if (!loading) e.target.style.background = '#2a5298';
+            }}
+            onMouseLeave={(e) => {
+              if (!loading) e.target.style.background = '#1e3c72';
+            }}
           >
             {loading ? 'Please wait...' : 'Sign in'}
           </button>
@@ -274,4 +313,3 @@ const Login = () => {
 };
 
 export default Login;
-
